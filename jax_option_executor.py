@@ -151,6 +151,100 @@ def manhattan_distance(
     ).sum()
 
 
+
+DEFAULT_GAMMA = 0.99
+
+
+# ============================================================
+# Option reward utilities
+# ============================================================
+
+def update_discounted_reward(
+    accumulated_reward,
+    primitive_reward,
+    primitive_step_index,
+    gamma,
+):
+    """
+    Add one primitive reward to an option-level discounted
+    reward accumulator.
+
+    For primitive step i:
+
+        R_option += gamma**i * r_i
+
+    This function is JAX-safe and can be used inside
+    jax.lax.scan / jax.lax.while_loop.
+    """
+
+    accumulated_reward = jnp.asarray(
+        accumulated_reward,
+        dtype=jnp.float32,
+    )
+
+    primitive_reward = jnp.asarray(
+        primitive_reward,
+        dtype=jnp.float32,
+    )
+
+    primitive_step_index = jnp.asarray(
+        primitive_step_index,
+        dtype=jnp.int32,
+    )
+
+    gamma = jnp.asarray(
+        gamma,
+        dtype=jnp.float32,
+    )
+
+    discount = jnp.power(
+        gamma,
+        primitive_step_index,
+    )
+
+    return (
+        accumulated_reward
+        + discount * primitive_reward
+    )
+
+
+def option_bootstrap_discount(
+    duration,
+    gamma,
+):
+    """
+    Return gamma**k for an option lasting k primitive steps.
+
+    This is the discount applied to the next-state value in
+    the semi-Markov (option-level) Bellman target.
+    """
+
+    duration = jnp.asarray(
+        duration,
+        dtype=jnp.int32,
+    )
+
+    gamma = jnp.asarray(
+        gamma,
+        dtype=jnp.float32,
+    )
+
+    return jnp.power(
+        gamma,
+        duration,
+    )
+
+
+def zero_option_reward():
+    """
+    Return a correctly typed zero reward accumulator.
+    """
+
+    return jnp.asarray(
+        0.0,
+        dtype=jnp.float32,
+    )
+
 # ============================================================
 # One navigation step
 # ============================================================
@@ -197,187 +291,137 @@ def go_to_key_jax(
     env,
     timestep,
     max_steps=50,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     JAX-compatible GO_TO_KEY option.
 
     Navigate until adjacent to the key, then face it.
+
+    Returns:
+        timestep, primitive_steps, option_reward, valid
     """
 
-    keys = timestep.state.get_keys()
-    key_position = keys.position[0]
+    key_position = timestep.state.get_keys().position[0]
+
+    initial_carry = (
+        timestep,
+        jnp.asarray(0, dtype=jnp.int32),
+        zero_option_reward(),
+    )
 
     def navigation_condition(carry):
-        current_timestep, primitive_steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
-
-        distance = manhattan_distance(
-            player.position,
-            key_position,
-        )
-
-        not_adjacent = (
-            distance > 1
-        )
-
-        within_budget = (
-            primitive_steps < max_steps
-        )
-
-        episode_active = jnp.logical_not(
-            current_timestep.is_done()
-        )
+        current_timestep, primitive_steps, _ = carry
+        player = current_timestep.state.get_player(idx=0)
+        distance = manhattan_distance(player.position, key_position)
 
         return jnp.logical_and(
             jnp.logical_and(
-                not_adjacent,
-                within_budget,
+                distance > 1,
+                primitive_steps < max_steps,
             ),
-            episode_active,
+            jnp.logical_not(current_timestep.is_done()),
         )
 
     def navigation_body(carry):
-        current_timestep, primitive_steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
+        current_timestep, primitive_steps, option_reward = carry
+        player = current_timestep.state.get_player(idx=0)
 
         desired_direction = direction_to_target(
             player.position,
             key_position,
         )
-
         action = action_towards_direction(
             player.direction,
             desired_direction,
         )
+        new_timestep = env.step(current_timestep, action)
 
-        new_timestep = env.step(
-            current_timestep,
-            action,
+        new_option_reward = update_discounted_reward(
+            option_reward,
+            new_timestep.reward,
+            primitive_steps,
+            gamma,
         )
 
         return (
             new_timestep,
             primitive_steps + 1,
+            new_option_reward,
         )
 
-    timestep, primitive_steps = jax.lax.while_loop(
+    timestep, primitive_steps, option_reward = jax.lax.while_loop(
         navigation_condition,
         navigation_body,
-        (
-            timestep,
-            jnp.asarray(
-                0,
-                dtype=jnp.int32,
-            ),
-        ),
+        initial_carry,
     )
 
-    player = timestep.state.get_player(
-        idx=0
-    )
-
+    player = timestep.state.get_player(idx=0)
     desired_direction = direction_to_adjacent_target(
         player.position,
         key_position,
     )
 
     def alignment_condition(carry):
-        current_timestep, primitive_steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
-
-        not_aligned = (
-            player.direction
-            != desired_direction
-        )
-
-        within_budget = (
-            primitive_steps < max_steps
-        )
-
-        episode_active = jnp.logical_not(
-            current_timestep.is_done()
-        )
+        current_timestep, primitive_steps, _ = carry
+        current_player = current_timestep.state.get_player(idx=0)
 
         return jnp.logical_and(
             jnp.logical_and(
-                not_aligned,
-                within_budget,
+                current_player.direction != desired_direction,
+                primitive_steps < max_steps,
             ),
-            episode_active,
+            jnp.logical_not(current_timestep.is_done()),
         )
 
     def alignment_body(carry):
-        current_timestep, primitive_steps = carry
-
+        current_timestep, primitive_steps, option_reward = carry
         new_timestep = env.step(
             current_timestep,
-            jnp.asarray(
-                ROTATE_RIGHT,
-                dtype=jnp.int32,
-            ),
+            jnp.asarray(ROTATE_RIGHT, dtype=jnp.int32),
+        )
+
+        new_option_reward = update_discounted_reward(
+            option_reward,
+            new_timestep.reward,
+            primitive_steps,
+            gamma,
         )
 
         return (
             new_timestep,
             primitive_steps + 1,
+            new_option_reward,
         )
 
-    timestep, primitive_steps = jax.lax.while_loop(
+    timestep, primitive_steps, option_reward = jax.lax.while_loop(
         alignment_condition,
         alignment_body,
-        (
-            timestep,
-            primitive_steps,
-        ),
+        (timestep, primitive_steps, option_reward),
     )
 
-    player = timestep.state.get_player(
-        idx=0
-    )
-
+    player = timestep.state.get_player(idx=0)
     final_distance = manhattan_distance(
         player.position,
         key_position,
     )
-
     final_direction = direction_to_adjacent_target(
         player.position,
         key_position,
     )
 
-    adjacent = (
-        final_distance == 1
-    )
-
-    facing_key = (
-        player.direction
-        == final_direction
-    )
-
-    within_budget = (
-        primitive_steps <= max_steps
-    )
-
     valid = jnp.logical_and(
         jnp.logical_and(
-            adjacent,
-            facing_key,
+            final_distance == 1,
+            player.direction == final_direction,
         ),
-        within_budget,
+        primitive_steps <= max_steps,
     )
 
     return (
         timestep,
         primitive_steps,
+        option_reward,
         valid,
     )
 
@@ -389,52 +433,44 @@ def go_to_key_jax(
 def pickup_key_jax(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     JAX-compatible PICKUP_KEY option.
+
+    Returns:
+        timestep, primitive_steps, option_reward, valid
     """
 
-    player_before = timestep.state.get_player(
-        idx=0
-    )
-
+    player_before = timestep.state.get_player(idx=0)
     pocket_before = player_before.pocket
 
     new_timestep = env.step(
         timestep,
-        jnp.asarray(
-            PICKUP,
-            dtype=jnp.int32,
-        ),
+        jnp.asarray(PICKUP, dtype=jnp.int32),
     )
 
-    player_after = new_timestep.state.get_player(
-        idx=0
-    )
-
+    player_after = new_timestep.state.get_player(idx=0)
     pocket_after = player_after.pocket
 
-    was_empty = (
-        pocket_before == -1
-    )
-
-    now_holding_item = (
-        pocket_after != -1
-    )
-
     valid = jnp.logical_and(
-        was_empty,
-        now_holding_item,
+        pocket_before == -1,
+        pocket_after != -1,
     )
 
-    primitive_steps = jnp.asarray(
-        1,
-        dtype=jnp.int32,
+    primitive_steps = jnp.asarray(1, dtype=jnp.int32)
+
+    option_reward = update_discounted_reward(
+        zero_option_reward(),
+        new_timestep.reward,
+        jnp.asarray(0, dtype=jnp.int32),
+        gamma,
     )
 
     return (
         new_timestep,
         primitive_steps,
+        option_reward,
         valid,
     )
 
@@ -447,16 +483,19 @@ def go_to_door_jax(
     env,
     timestep,
     max_steps=50,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     JAX-compatible GO_TO_DOOR option.
 
-    The agent navigates to the tile immediately left
-    of the door and finishes facing east toward it.
+    The agent navigates to the tile immediately left of the
+    door and finishes facing east toward it.
+
+    Returns:
+        timestep, primitive_steps, option_reward, valid
     """
 
-    doors = timestep.state.get_doors()
-    door_position = doors.position[0]
+    door_position = timestep.state.get_doors().position[0]
 
     approach_position = jnp.asarray(
         [
@@ -466,159 +505,117 @@ def go_to_door_jax(
         dtype=jnp.int32,
     )
 
+    initial_carry = (
+        timestep,
+        jnp.asarray(0, dtype=jnp.int32),
+        zero_option_reward(),
+    )
+
     def navigation_condition(carry):
-        current_timestep, primitive_steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
-
+        current_timestep, primitive_steps, _ = carry
+        player = current_timestep.state.get_player(idx=0)
         distance = manhattan_distance(
             player.position,
             approach_position,
         )
 
-        not_at_target = (
-            distance > 0
-        )
-
-        within_budget = (
-            primitive_steps < max_steps
-        )
-
-        episode_active = jnp.logical_not(
-            current_timestep.is_done()
-        )
-
         return jnp.logical_and(
             jnp.logical_and(
-                not_at_target,
-                within_budget,
+                distance > 0,
+                primitive_steps < max_steps,
             ),
-            episode_active,
+            jnp.logical_not(current_timestep.is_done()),
         )
 
     def navigation_body(carry):
-        current_timestep, primitive_steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
+        current_timestep, primitive_steps, option_reward = carry
+        player = current_timestep.state.get_player(idx=0)
 
         desired_direction = direction_to_target(
             player.position,
             approach_position,
         )
-
         action = action_towards_direction(
             player.direction,
             desired_direction,
         )
+        new_timestep = env.step(current_timestep, action)
 
-        new_timestep = env.step(
-            current_timestep,
-            action,
+        new_option_reward = update_discounted_reward(
+            option_reward,
+            new_timestep.reward,
+            primitive_steps,
+            gamma,
         )
 
         return (
             new_timestep,
             primitive_steps + 1,
+            new_option_reward,
         )
 
-    timestep, primitive_steps = jax.lax.while_loop(
+    timestep, primitive_steps, option_reward = jax.lax.while_loop(
         navigation_condition,
         navigation_body,
-        (
-            timestep,
-            jnp.asarray(
-                0,
-                dtype=jnp.int32,
-            ),
-        ),
+        initial_carry,
     )
 
-    desired_direction = jnp.asarray(
-        EAST,
-        dtype=jnp.int32,
-    )
+    desired_direction = jnp.asarray(EAST, dtype=jnp.int32)
 
     def alignment_condition(carry):
-        current_timestep, primitive_steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
-
-        not_aligned = (
-            player.direction
-            != desired_direction
-        )
-
-        within_budget = (
-            primitive_steps < max_steps
-        )
-
-        episode_active = jnp.logical_not(
-            current_timestep.is_done()
-        )
+        current_timestep, primitive_steps, _ = carry
+        player = current_timestep.state.get_player(idx=0)
 
         return jnp.logical_and(
             jnp.logical_and(
-                not_aligned,
-                within_budget,
+                player.direction != desired_direction,
+                primitive_steps < max_steps,
             ),
-            episode_active,
+            jnp.logical_not(current_timestep.is_done()),
         )
 
     def alignment_body(carry):
-        current_timestep, primitive_steps = carry
+        current_timestep, primitive_steps, option_reward = carry
 
         new_timestep = env.step(
             current_timestep,
-            jnp.asarray(
-                ROTATE_RIGHT,
-                dtype=jnp.int32,
-            ),
+            jnp.asarray(ROTATE_RIGHT, dtype=jnp.int32),
+        )
+
+        new_option_reward = update_discounted_reward(
+            option_reward,
+            new_timestep.reward,
+            primitive_steps,
+            gamma,
         )
 
         return (
             new_timestep,
             primitive_steps + 1,
+            new_option_reward,
         )
 
-    timestep, primitive_steps = jax.lax.while_loop(
+    timestep, primitive_steps, option_reward = jax.lax.while_loop(
         alignment_condition,
         alignment_body,
-        (
-            timestep,
-            primitive_steps,
-        ),
+        (timestep, primitive_steps, option_reward),
     )
 
-    player = timestep.state.get_player(
-        idx=0
-    )
-
-    correct_position = jnp.all(
-        player.position
-        == approach_position
-    )
-
-    facing_door = (
-        player.direction
-        == EAST
-    )
+    player = timestep.state.get_player(idx=0)
 
     valid = jnp.logical_and(
-        correct_position,
-        facing_door,
+        jnp.all(player.position == approach_position),
+        player.direction == EAST,
     )
 
     return (
         timestep,
         primitive_steps,
+        option_reward,
         valid,
     )
+
+
 # ============================================================
 # JAX OPTION 4: OPEN_DOOR
 # ============================================================
@@ -626,6 +623,7 @@ def go_to_door_jax(
 def open_door_jax(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     JAX-compatible OPEN_DOOR option.
@@ -633,25 +631,18 @@ def open_door_jax(
     Executes one primitive TOGGLE action.
 
     Returns:
-        timestep
-        primitive_steps
-        valid
+        timestep, primitive_steps, option_reward, valid
     """
 
     doors_before = timestep.state.get_doors()
-
     was_open = doors_before.open[0]
 
     new_timestep = env.step(
         timestep,
-        jnp.asarray(
-            TOGGLE,
-            dtype=jnp.int32,
-        ),
+        jnp.asarray(TOGGLE, dtype=jnp.int32),
     )
 
     doors_after = new_timestep.state.get_doors()
-
     is_open = doors_after.open[0]
 
     valid = jnp.logical_and(
@@ -659,19 +650,23 @@ def open_door_jax(
         is_open,
     )
 
-    primitive_steps = jnp.asarray(
-        1,
-        dtype=jnp.int32,
+    primitive_steps = jnp.asarray(1, dtype=jnp.int32)
+
+    option_reward = update_discounted_reward(
+        zero_option_reward(),
+        new_timestep.reward,
+        jnp.asarray(0, dtype=jnp.int32),
+        gamma,
     )
 
     return (
         new_timestep,
         primitive_steps,
+        option_reward,
         valid,
     )
-# ============================================================
-# JAX OPTION 5: GO_TO_GOAL
-# ============================================================
+
+
 # ============================================================
 # JAX OPTION 5: GO_TO_GOAL
 # ============================================================
@@ -680,40 +675,26 @@ def go_to_goal_jax(
     env,
     timestep,
     max_steps=50,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     JAX-compatible GO_TO_GOAL option.
 
-    Assumes:
-        - the door is already open
-        - the player is on the tile immediately left of the door
-        - the player is facing east
-
-    Execution:
-        1. Move onto the open door tile.
-        2. Move east again into the second room.
-        3. Navigate greedily to the goal.
+    Assumes the door is open and the player is immediately
+    left of it facing east. The option enters the doorway,
+    exits into the second room, then navigates to the goal.
 
     Returns:
-        timestep
-        primitive_steps
-        valid
+        timestep, primitive_steps, option_reward, valid
     """
 
-    goals = timestep.state.get_goals()
-    goal_position = goals.position[0]
+    goal_position = timestep.state.get_goals().position[0]
 
     doors = timestep.state.get_doors()
     door_position = doors.position[0]
 
-    primitive_steps = jnp.asarray(
-        0,
-        dtype=jnp.int32,
-    )
-
-    # --------------------------------------------------------
-    # Important positions
-    # --------------------------------------------------------
+    primitive_steps = jnp.asarray(0, dtype=jnp.int32)
+    option_reward = zero_option_reward()
 
     left_of_door = jnp.asarray(
         [
@@ -723,245 +704,148 @@ def go_to_goal_jax(
         dtype=jnp.int32,
     )
 
-    right_of_door = jnp.asarray(
-        [
-            door_position[0],
-            door_position[1] + 1,
-        ],
-        dtype=jnp.int32,
-    )
-
-    # --------------------------------------------------------
-    # Phase 1:
-    # Move from left of door -> door tile
-    # --------------------------------------------------------
-
-    player = timestep.state.get_player(
-        idx=0
-    )
-
-    door_open = doors.open[0]
-
-    on_left_of_door = jnp.all(
-        player.position
-        == left_of_door
-    )
-
-    facing_east = (
-        player.direction
-        == EAST
-    )
+    player = timestep.state.get_player(idx=0)
 
     can_enter_door = jnp.logical_and(
         jnp.logical_and(
-            door_open,
-            on_left_of_door,
+            doors.open[0],
+            jnp.all(player.position == left_of_door),
         ),
-        facing_east,
+        player.direction == EAST,
     )
 
     def enter_door(args):
-
-        current_timestep, steps = args
+        current_timestep, steps, accumulated_reward = args
 
         new_timestep = env.step(
             current_timestep,
-            jnp.asarray(
-                FORWARD,
-                dtype=jnp.int32,
-            ),
+            jnp.asarray(FORWARD, dtype=jnp.int32),
+        )
+
+        new_reward = update_discounted_reward(
+            accumulated_reward,
+            new_timestep.reward,
+            steps,
+            gamma,
         )
 
         return (
             new_timestep,
             steps + 1,
+            new_reward,
         )
 
-    def skip_enter_door(args):
-        return args
-
-    timestep, primitive_steps = jax.lax.cond(
+    timestep, primitive_steps, option_reward = jax.lax.cond(
         can_enter_door,
         enter_door,
-        skip_enter_door,
-        (
-            timestep,
-            primitive_steps,
-        ),
+        lambda args: args,
+        (timestep, primitive_steps, option_reward),
     )
 
-    # --------------------------------------------------------
-    # Phase 2:
-    # Move from door tile -> second room
-    #
-    # This is essential. If we start greedy navigation while
-    # still on the door tile, row-first movement may attempt
-    # to walk along the separating wall.
-    # --------------------------------------------------------
-
-    player = timestep.state.get_player(
-        idx=0
-    )
-
-    on_door = jnp.all(
-        player.position
-        == door_position
-    )
-
-    facing_east = (
-        player.direction
-        == EAST
-    )
+    player = timestep.state.get_player(idx=0)
 
     can_exit_door = jnp.logical_and(
-        on_door,
-        facing_east,
+        jnp.all(player.position == door_position),
+        player.direction == EAST,
     )
 
     def exit_door(args):
-
-        current_timestep, steps = args
+        current_timestep, steps, accumulated_reward = args
 
         new_timestep = env.step(
             current_timestep,
-            jnp.asarray(
-                FORWARD,
-                dtype=jnp.int32,
-            ),
+            jnp.asarray(FORWARD, dtype=jnp.int32),
+        )
+
+        new_reward = update_discounted_reward(
+            accumulated_reward,
+            new_timestep.reward,
+            steps,
+            gamma,
         )
 
         return (
             new_timestep,
             steps + 1,
+            new_reward,
         )
 
-    def skip_exit_door(args):
-        return args
-
-    timestep, primitive_steps = jax.lax.cond(
+    timestep, primitive_steps, option_reward = jax.lax.cond(
         can_exit_door,
         exit_door,
-        skip_exit_door,
-        (
-            timestep,
-            primitive_steps,
-        ),
+        lambda args: args,
+        (timestep, primitive_steps, option_reward),
     )
 
-    # --------------------------------------------------------
-    # Phase 3:
-    # Navigate through second room to goal
-    # --------------------------------------------------------
-
     def navigation_condition(carry):
-
-        current_timestep, steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
-
-        distance = manhattan_distance(
-            player.position,
-            goal_position,
-        )
-
-        not_at_goal = (
-            distance > 0
-        )
-
-        within_budget = (
-            steps < max_steps
-        )
-
-        episode_active = jnp.logical_not(
-            current_timestep.is_done()
-        )
+        current_timestep, steps, _ = carry
+        player = current_timestep.state.get_player(idx=0)
 
         return jnp.logical_and(
             jnp.logical_and(
-                not_at_goal,
-                within_budget,
+                manhattan_distance(
+                    player.position,
+                    goal_position,
+                ) > 0,
+                steps < max_steps,
             ),
-            episode_active,
+            jnp.logical_not(current_timestep.is_done()),
         )
 
     def navigation_body(carry):
-
-        current_timestep, steps = carry
-
-        player = current_timestep.state.get_player(
-            idx=0
-        )
+        current_timestep, steps, accumulated_reward = carry
+        player = current_timestep.state.get_player(idx=0)
 
         desired_direction = direction_to_target(
             player.position,
             goal_position,
         )
-
         action = action_towards_direction(
             player.direction,
             desired_direction,
         )
+        new_timestep = env.step(current_timestep, action)
 
-        new_timestep = env.step(
-            current_timestep,
-            action,
+        new_reward = update_discounted_reward(
+            accumulated_reward,
+            new_timestep.reward,
+            steps,
+            gamma,
         )
 
         return (
             new_timestep,
             steps + 1,
+            new_reward,
         )
 
-    timestep, primitive_steps = jax.lax.while_loop(
+    timestep, primitive_steps, option_reward = jax.lax.while_loop(
         navigation_condition,
         navigation_body,
-        (
-            timestep,
-            primitive_steps,
-        ),
+        (timestep, primitive_steps, option_reward),
     )
 
-    # --------------------------------------------------------
-    # Final validity check
-    # --------------------------------------------------------
-
-    player = timestep.state.get_player(
-        idx=0
-    )
-
-    reached_goal = jnp.all(
-        player.position
-        == goal_position
-    )
-
-    episode_done = timestep.is_done()
-
-    positive_reward = (
-        timestep.reward > 0.0
-    )
-
-    within_budget = (
-        primitive_steps <= max_steps
-    )
+    player = timestep.state.get_player(idx=0)
 
     valid = jnp.logical_and(
         jnp.logical_and(
-            reached_goal,
-            episode_done,
+            jnp.all(player.position == goal_position),
+            timestep.is_done(),
         ),
         jnp.logical_and(
-            positive_reward,
-            within_budget,
+            timestep.reward > 0.0,
+            primitive_steps <= max_steps,
         ),
     )
 
     return (
         timestep,
         primitive_steps,
+        option_reward,
         valid,
     )
+
+
 # ============================================================
 # High-level option IDs
 # ============================================================
@@ -982,42 +866,37 @@ NUM_OPTIONS = 5
 def failed_option_jax(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     JAX-compatible failed option.
 
-    Invalid or currently inapplicable option selections
-    consume exactly one primitive environment step.
-
-    This prevents:
-        - zero-duration options
-        - Python exceptions
-        - PPO repeatedly selecting impossible actions
-          without advancing environment time
+    Invalid or currently inapplicable option selections consume
+    exactly one primitive environment step.
 
     Returns:
-        timestep
-        primitive_steps = 1
-        valid = False
+        timestep, primitive_steps, option_reward, valid
     """
 
     new_timestep = env.step(
         timestep,
-        jnp.asarray(
-            DONE,
-            dtype=jnp.int32,
-        ),
+        jnp.asarray(DONE, dtype=jnp.int32),
+    )
+
+    primitive_steps = jnp.asarray(1, dtype=jnp.int32)
+
+    option_reward = update_discounted_reward(
+        zero_option_reward(),
+        new_timestep.reward,
+        jnp.asarray(0, dtype=jnp.int32),
+        gamma,
     )
 
     return (
         new_timestep,
-        jnp.asarray(
-            1,
-            dtype=jnp.int32,
-        ),
-        jnp.asarray(
-            False
-        ),
+        primitive_steps,
+        option_reward,
+        jnp.asarray(False),
     )
 
 
@@ -1088,6 +967,7 @@ def key_is_available_jax(
 def _go_to_key_branch(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     Execute GO_TO_KEY only while the key still exists.
@@ -1102,10 +982,12 @@ def _go_to_key_branch(
         lambda ts: go_to_key_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: failed_option_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         timestep,
     )
@@ -1114,6 +996,7 @@ def _go_to_key_branch(
 def _pickup_key_branch(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     Attempt PICKUP_KEY.
@@ -1125,12 +1008,14 @@ def _pickup_key_branch(
     return pickup_key_jax(
         env,
         timestep,
+        gamma=gamma,
     )
 
 
 def _go_to_door_branch(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     GO_TO_DOOR is only applicable after collecting
@@ -1157,10 +1042,12 @@ def _go_to_door_branch(
         lambda ts: go_to_door_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: failed_option_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         timestep,
     )
@@ -1169,6 +1056,7 @@ def _go_to_door_branch(
 def _open_door_branch(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     Attempt OPEN_DOOR.
@@ -1197,10 +1085,12 @@ def _open_door_branch(
         lambda ts: open_door_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: failed_option_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         timestep,
     )
@@ -1209,6 +1099,7 @@ def _open_door_branch(
 def _go_to_goal_branch(
     env,
     timestep,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     GO_TO_GOAL is only allowed once the door is open.
@@ -1223,10 +1114,12 @@ def _go_to_goal_branch(
         lambda ts: go_to_goal_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: failed_option_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         timestep,
     )
@@ -1240,6 +1133,7 @@ def execute_option_jax(
     env,
     timestep,
     option_id,
+    gamma=DEFAULT_GAMMA,
 ):
     """
     Execute one high-level option selected by an integer ID.
@@ -1263,6 +1157,10 @@ def execute_option_jax(
         Number of primitive environment actions consumed
         by this option.
 
+    option_reward:
+        Discounted reward accumulated across the primitive
+        transitions executed by the option.
+
     valid:
         True if the selected option successfully executed
         in the current state.
@@ -1282,22 +1180,27 @@ def execute_option_jax(
         lambda ts: _go_to_key_branch(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: _pickup_key_branch(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: _go_to_door_branch(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: _open_door_branch(
             env,
             ts,
+            gamma=gamma,
         ),
         lambda ts: _go_to_goal_branch(
             env,
             ts,
+            gamma=gamma,
         ),
     )
 
@@ -1311,6 +1214,7 @@ def execute_option_jax(
         lambda ts: failed_option_jax(
             env,
             ts,
+            gamma=gamma,
         ),
         timestep,
     )

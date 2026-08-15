@@ -8,12 +8,17 @@ from jax_option_executor import (
     action_towards_direction,
     go_to_key_jax,
     pickup_key_jax,
-    go_to_door_jax,open_door_jax, go_to_goal_jax
+    go_to_door_jax,
+    open_door_jax,
+    go_to_goal_jax,
 )
 
 
+GAMMA = 0.99
+
+
 print(
-    "Testing JAX option utilities...\n"
+    "Testing reward-aware JAX options...\n"
 )
 
 
@@ -87,7 +92,7 @@ print(
 
 # ============================================================
 # TEST 3
-# Action selection
+# Primitive action selection
 # ============================================================
 
 action_fn = jax.jit(
@@ -133,7 +138,10 @@ env = nx.make(
 )
 
 rng = jax.random.PRNGKey(0)
-timestep = env.reset(rng)
+
+timestep = env.reset(
+    rng
+)
 
 
 # ============================================================
@@ -167,11 +175,17 @@ go_to_key_fn = jax.jit(
     lambda ts: go_to_key_jax(
         env,
         ts,
+        gamma=GAMMA,
     )
 )
 
 
-timestep, go_to_key_duration, go_to_key_valid = go_to_key_fn(
+(
+    timestep,
+    go_to_key_duration,
+    go_to_key_reward,
+    go_to_key_valid,
+) = go_to_key_fn(
     timestep
 )
 
@@ -181,6 +195,7 @@ player_after_key = timestep.state.get_player(
 )
 
 key_after = timestep.state.get_keys()
+
 
 print(
     "\nAfter GO_TO_KEY"
@@ -207,6 +222,11 @@ print(
 )
 
 print(
+    "GO_TO_KEY option reward:",
+    go_to_key_reward
+)
+
+print(
     "GO_TO_KEY valid:",
     go_to_key_valid
 )
@@ -219,7 +239,17 @@ distance = jnp.abs(
 
 
 assert int(distance) == 1
-assert bool(go_to_key_valid)
+
+assert bool(
+    go_to_key_valid
+)
+
+# No environment reward should occur while navigating to key.
+assert jnp.isclose(
+    go_to_key_reward,
+    0.0,
+    atol=1e-6,
+)
 
 print(
     "TEST 4 PASS"
@@ -235,6 +265,7 @@ pickup_key_fn = jax.jit(
     lambda ts: pickup_key_jax(
         env,
         ts,
+        gamma=GAMMA,
     )
 )
 
@@ -253,7 +284,12 @@ print(
 )
 
 
-timestep, pickup_duration, pickup_valid = pickup_key_fn(
+(
+    timestep,
+    pickup_duration,
+    pickup_reward,
+    pickup_valid,
+) = pickup_key_fn(
     timestep
 )
 
@@ -263,6 +299,7 @@ player_after_pickup = timestep.state.get_player(
 )
 
 key_after_pickup = timestep.state.get_keys()
+
 
 print(
     "\nAfter PICKUP_KEY"
@@ -294,6 +331,11 @@ print(
 )
 
 print(
+    "PICKUP_KEY option reward:",
+    pickup_reward
+)
+
+print(
     "PICKUP_KEY valid:",
     pickup_valid
 )
@@ -315,6 +357,12 @@ assert bool(
     pickup_valid
 )
 
+assert jnp.isclose(
+    pickup_reward,
+    0.0,
+    atol=1e-6,
+)
+
 print(
     "TEST 5 PASS"
 )
@@ -329,11 +377,17 @@ go_to_door_fn = jax.jit(
     lambda ts: go_to_door_jax(
         env,
         ts,
+        gamma=GAMMA,
     )
 )
 
 
-timestep, go_to_door_duration, go_to_door_valid = go_to_door_fn(
+(
+    timestep,
+    go_to_door_duration,
+    go_to_door_reward,
+    go_to_door_valid,
+) = go_to_door_fn(
     timestep
 )
 
@@ -385,6 +439,11 @@ print(
 )
 
 print(
+    "GO_TO_DOOR option reward:",
+    go_to_door_reward
+)
+
+print(
     "GO_TO_DOOR valid:",
     go_to_door_valid
 )
@@ -405,9 +464,16 @@ assert bool(
     go_to_door_valid
 )
 
+assert jnp.isclose(
+    go_to_door_reward,
+    0.0,
+    atol=1e-6,
+)
+
 print(
     "TEST 6 PASS"
 )
+
 
 # ============================================================
 # TEST 7
@@ -418,6 +484,7 @@ open_door_fn = jax.jit(
     lambda ts: open_door_jax(
         env,
         ts,
+        gamma=GAMMA,
     )
 )
 
@@ -432,11 +499,19 @@ print(
     doors_before.open
 )
 
-timestep, open_door_duration, open_door_valid = open_door_fn(
+
+(
+    timestep,
+    open_door_duration,
+    open_door_reward,
+    open_door_valid,
+) = open_door_fn(
     timestep
 )
 
+
 doors_after = timestep.state.get_doors()
+
 
 print(
     "\nAfter OPEN_DOOR"
@@ -453,9 +528,15 @@ print(
 )
 
 print(
+    "OPEN_DOOR option reward:",
+    open_door_reward
+)
+
+print(
     "OPEN_DOOR valid:",
     open_door_valid
 )
+
 
 assert bool(
     doors_before.open[0]
@@ -473,9 +554,16 @@ assert bool(
     open_door_valid
 )
 
+assert jnp.isclose(
+    open_door_reward,
+    0.0,
+    atol=1e-6,
+)
+
 print(
     "TEST 7 PASS"
 )
+
 
 # ============================================================
 # TEST 8
@@ -486,18 +574,27 @@ go_to_goal_fn = jax.jit(
     lambda ts: go_to_goal_jax(
         env,
         ts,
+        gamma=GAMMA,
     )
 )
 
-timestep, go_to_goal_duration, go_to_goal_valid = go_to_goal_fn(
+
+(
+    timestep,
+    go_to_goal_duration,
+    go_to_goal_reward,
+    go_to_goal_valid,
+) = go_to_goal_fn(
     timestep
 )
+
 
 player_after_goal = timestep.state.get_player(
     idx=0
 )
 
 goals = timestep.state.get_goals()
+
 
 print(
     "\nAfter GO_TO_GOAL"
@@ -514,8 +611,13 @@ print(
 )
 
 print(
-    "Reward:",
+    "Final primitive reward:",
     timestep.reward
+)
+
+print(
+    "Discounted GO_TO_GOAL option reward:",
+    go_to_goal_reward
 )
 
 print(
@@ -553,13 +655,43 @@ assert bool(
     go_to_goal_valid
 )
 
+
+# ------------------------------------------------------------
+# The terminal reward arrives on the final primitive transition.
+#
+# For a 5-step option:
+#
+# 0 + gamma*0 + gamma^2*0 + gamma^3*0 + gamma^4*1
+# ------------------------------------------------------------
+
+expected_goal_reward = (
+    GAMMA ** (
+        int(go_to_goal_duration) - 1
+    )
+)
+
+
+print(
+    "Expected discounted GO_TO_GOAL reward:",
+    expected_goal_reward
+)
+
+
+assert jnp.isclose(
+    go_to_goal_reward,
+    expected_goal_reward,
+    atol=1e-6,
+)
+
 print(
     "TEST 8 PASS"
 )
 
+
 # ============================================================
 # Combined check
 # ============================================================
+
 total_duration = (
     int(go_to_key_duration)
     + int(pickup_duration)
@@ -568,16 +700,26 @@ total_duration = (
     + int(go_to_goal_duration)
 )
 
+
+total_option_reward = (
+    float(go_to_key_reward)
+    + float(pickup_reward)
+    + float(go_to_door_reward)
+    + float(open_door_reward)
+    + float(go_to_goal_reward)
+)
+
+
 print(
-    "\n==============================="
+    "\n================================"
 )
 
 print(
-    "ALL FIVE JAX OPTIONS PASSED"
+    "ALL FIVE REWARD-AWARE JAX OPTIONS PASSED"
 )
 
 print(
-    "==============================="
+    "================================"
 )
 
 print(
@@ -593,4 +735,14 @@ print(
 print(
     "Mean primitive steps per option:",
     f"{total_duration / 5:.2f}"
+)
+
+print(
+    "Total option-level reward:",
+    total_option_reward
+)
+
+print(
+    "Terminal option discounted reward:",
+    go_to_goal_reward
 )

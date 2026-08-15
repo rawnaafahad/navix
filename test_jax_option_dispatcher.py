@@ -7,6 +7,9 @@ from jax_option_executor import (
 )
 
 
+GAMMA = 0.99
+
+
 # ============================================================
 # Create environment
 # ============================================================
@@ -16,8 +19,9 @@ env = nx.make(
 )
 
 
-def create_timestep(seed=0):
-
+def create_timestep(
+    seed=0,
+):
     rng = jax.random.PRNGKey(
         seed
     )
@@ -28,7 +32,7 @@ def create_timestep(seed=0):
 
 
 # ============================================================
-# JIT-compile the complete dispatcher
+# JIT-compile complete dispatcher
 # ============================================================
 
 execute_option_fn = jax.jit(
@@ -37,12 +41,13 @@ execute_option_fn = jax.jit(
             env,
             timestep,
             option_id,
+            gamma=GAMMA,
         )
 )
 
 
 print(
-    "Testing JAX option dispatcher...\n"
+    "Testing reward-aware JAX option dispatcher...\n"
 )
 
 
@@ -55,6 +60,7 @@ timestep = create_timestep(
     seed=0
 )
 
+
 sequence = [
     0,  # GO_TO_KEY
     1,  # PICKUP_KEY
@@ -62,6 +68,7 @@ sequence = [
     3,  # OPEN_DOOR
     4,  # GO_TO_GOAL
 ]
+
 
 option_names = [
     "GO_TO_KEY",
@@ -73,6 +80,7 @@ option_names = [
 
 
 total_primitive_steps = 0
+option_rewards = []
 
 
 print(
@@ -82,7 +90,12 @@ print(
 
 for option_id in sequence:
 
-    timestep, duration, valid = execute_option_fn(
+    (
+        timestep,
+        duration,
+        option_reward,
+        valid,
+    ) = execute_option_fn(
         timestep,
         jnp.asarray(
             option_id,
@@ -94,6 +107,10 @@ for option_id in sequence:
         duration
     )
 
+    option_rewards.append(
+        float(option_reward)
+    )
+
     print(
         f"{option_names[option_id]}:"
     )
@@ -101,6 +118,11 @@ for option_id in sequence:
     print(
         "    Duration:",
         duration
+    )
+
+    print(
+        "    Option reward:",
+        option_reward
     )
 
     print(
@@ -114,7 +136,7 @@ for option_id in sequence:
 
 
 print(
-    "Reward:",
+    "Final primitive reward:",
     timestep.reward
 )
 
@@ -128,6 +150,11 @@ print(
     total_primitive_steps
 )
 
+print(
+    "Option rewards:",
+    option_rewards
+)
+
 
 assert bool(
     timestep.is_done()
@@ -137,6 +164,32 @@ assert float(
     timestep.reward
 ) > 0.0
 
+
+# First four options should have no reward.
+for reward in option_rewards[:4]:
+
+    assert abs(
+        reward
+    ) < 1e-6
+
+
+# GO_TO_GOAL should carry discounted terminal reward.
+expected_goal_reward = (
+    GAMMA ** 4
+)
+
+
+assert jnp.isclose(
+    option_rewards[4],
+    expected_goal_reward,
+    atol=1e-6,
+)
+
+
+print(
+    "Expected final option reward:",
+    expected_goal_reward
+)
 
 print(
     "TEST 1 PASS\n"
@@ -156,13 +209,20 @@ time_before = int(
     timestep.t
 )
 
-timestep, duration, valid = execute_option_fn(
+
+(
+    timestep,
+    duration,
+    option_reward,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         4,
         dtype=jnp.int32,
     ),
 )
+
 
 time_after = int(
     timestep.t
@@ -176,6 +236,11 @@ print(
 print(
     "Duration:",
     duration
+)
+
+print(
+    "Option reward:",
+    option_reward
 )
 
 print(
@@ -201,6 +266,12 @@ assert (
     time_after - time_before
 ) == 1
 
+assert jnp.isclose(
+    option_reward,
+    0.0,
+    atol=1e-6,
+)
+
 
 print(
     "TEST 2 PASS\n"
@@ -216,7 +287,13 @@ timestep = create_timestep(
     seed=0
 )
 
-timestep, duration, valid = execute_option_fn(
+
+(
+    timestep,
+    duration,
+    option_reward,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         2,
@@ -235,6 +312,11 @@ print(
 )
 
 print(
+    "Option reward:",
+    option_reward
+)
+
+print(
     "Valid:",
     valid
 )
@@ -247,6 +329,12 @@ assert bool(
 assert int(
     duration
 ) == 1
+
+assert jnp.isclose(
+    option_reward,
+    0.0,
+    atol=1e-6,
+)
 
 
 print(
@@ -263,7 +351,13 @@ timestep = create_timestep(
     seed=0
 )
 
-timestep, duration, valid = execute_option_fn(
+
+(
+    timestep,
+    duration,
+    option_reward,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         3,
@@ -282,6 +376,11 @@ print(
 )
 
 print(
+    "Option reward:",
+    option_reward
+)
+
+print(
     "Valid:",
     valid
 )
@@ -294,6 +393,12 @@ assert bool(
 assert int(
     duration
 ) == 1
+
+assert jnp.isclose(
+    option_reward,
+    0.0,
+    atol=1e-6,
+)
 
 
 print(
@@ -310,7 +415,13 @@ timestep = create_timestep(
     seed=0
 )
 
-timestep, _, valid = execute_option_fn(
+
+(
+    timestep,
+    _,
+    _,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         0,
@@ -322,7 +433,13 @@ assert bool(
     valid
 )
 
-timestep, _, valid = execute_option_fn(
+
+(
+    timestep,
+    _,
+    _,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         1,
@@ -335,7 +452,12 @@ assert bool(
 )
 
 
-timestep, duration, valid = execute_option_fn(
+(
+    timestep,
+    duration,
+    option_reward,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         0,
@@ -354,6 +476,11 @@ print(
 )
 
 print(
+    "Option reward:",
+    option_reward
+)
+
+print(
     "Valid:",
     valid
 )
@@ -366,6 +493,12 @@ assert bool(
 assert int(
     duration
 ) == 1
+
+assert jnp.isclose(
+    option_reward,
+    0.0,
+    atol=1e-6,
+)
 
 
 print(
@@ -382,7 +515,13 @@ timestep = create_timestep(
     seed=0
 )
 
-timestep, duration, valid = execute_option_fn(
+
+(
+    timestep,
+    duration,
+    option_reward,
+    valid,
+) = execute_option_fn(
     timestep,
     jnp.asarray(
         99,
@@ -401,6 +540,11 @@ print(
 )
 
 print(
+    "Option reward:",
+    option_reward
+)
+
+print(
     "Valid:",
     valid
 )
@@ -413,6 +557,12 @@ assert bool(
 assert int(
     duration
 ) == 1
+
+assert jnp.isclose(
+    option_reward,
+    0.0,
+    atol=1e-6,
+)
 
 
 print(
@@ -429,7 +579,7 @@ print(
 )
 
 print(
-    "JAX OPTION DISPATCHER PASSED"
+    "REWARD-AWARE JAX DISPATCHER PASSED"
 )
 
 print(
@@ -437,7 +587,7 @@ print(
 )
 
 print(
-    "\nThe high-level action space is now:"
+    "\nThe high-level action space is:"
 )
 
 print(
@@ -458,4 +608,12 @@ print(
 
 print(
     "4 = GO_TO_GOAL"
+)
+
+print(
+    "\nEach dispatched option now returns:"
+)
+
+print(
+    "timestep, duration, option_reward, valid"
 )
