@@ -137,3 +137,6 @@ dmypy.json
 .pyre/
 *.npz
 option_ppo_100k_success_rate.png
+option_ppo_*_seed*.pkl
+option_ppo_1m_checkpoint.pkl
+primitive_ppo_*_seed*.pkl
