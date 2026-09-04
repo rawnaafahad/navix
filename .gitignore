@@ -142,3 +142,9 @@ option_ppo_1m_checkpoint.pkl
 primitive_ppo_*_seed*.pkl
 horizon_*_1m_seed*.pkl
 *.pkl
+
+# NLE dissertation experiment artifacts
+checkpoints_*.pkl
+eval_*.csv
+*.txt
+nle.dataset
